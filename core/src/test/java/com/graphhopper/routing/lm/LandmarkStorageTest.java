@@ -1,14 +1,14 @@
 /*
  *  Licensed to GraphHopper GmbH under one or more contributor
- *  license agreements. See the NOTICE file distributed with this work for 
+ *  license agreements. See the NOTICE file distributed with this work for
  *  additional information regarding copyright ownership.
- * 
- *  GraphHopper GmbH licenses this file to you under the Apache License, 
- *  Version 2.0 (the "License"); you may not use this file except in 
+ *
+ *  GraphHopper GmbH licenses this file to you under the Apache License,
+ *  Version 2.0 (the "License"); you may not use this file except in
  *  compliance with the License. You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  *  Unless required by applicable law or agreed to in writing, software
  *  distributed under the License is distributed on an "AS IS" BASIS,
  *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,14 +17,20 @@
  */
 package com.graphhopper.routing.lm;
 
-import com.graphhopper.routing.AbstractRoutingAlgorithmTester;
-import com.graphhopper.routing.util.*;
+import com.graphhopper.routing.RoutingAlgorithmTest;
+import com.graphhopper.routing.util.CarFlagEncoder;
+import com.graphhopper.routing.util.EncodingManager;
+import com.graphhopper.routing.util.FlagEncoder;
 import com.graphhopper.routing.util.spatialrules.DefaultSpatialRule;
 import com.graphhopper.routing.util.spatialrules.SpatialRule;
 import com.graphhopper.routing.util.spatialrules.SpatialRuleLookup;
 import com.graphhopper.routing.weighting.FastestWeighting;
-import com.graphhopper.storage.*;
+import com.graphhopper.storage.DataAccess;
+import com.graphhopper.storage.Directory;
+import com.graphhopper.storage.GraphHopperStorage;
+import com.graphhopper.storage.RAMDirectory;
 import com.graphhopper.util.EdgeIteratorState;
+import com.graphhopper.util.GHUtility;
 import com.graphhopper.util.shapes.BBox;
 import com.graphhopper.util.shapes.GHPoint;
 import org.junit.After;
@@ -41,14 +47,14 @@ import static org.junit.Assert.*;
 public class LandmarkStorageTest {
     private GraphHopperStorage ghStorage;
     private FlagEncoder encoder;
-    private TraversalMode tm;
+    private EncodingManager encodingManager;
 
     @Before
     public void setUp() {
         encoder = new CarFlagEncoder();
-        tm = TraversalMode.NODE_BASED;
+        encodingManager = EncodingManager.create(encoder);
         ghStorage = new GraphHopperStorage(new RAMDirectory(),
-                new EncodingManager(encoder), false, new GraphExtension.NoOpExtension());
+                encodingManager, false);
         ghStorage.create(1000);
     }
 
@@ -62,21 +68,21 @@ public class LandmarkStorageTest {
     public void testInfinitWeight() {
         Directory dir = new RAMDirectory();
         EdgeIteratorState edge = ghStorage.edge(0, 1);
-        int res = new LandmarkStorage(ghStorage, dir, 8, new FastestWeighting(encoder) {
+        int res = new LandmarkStorage(ghStorage, dir, new FastestWeighting(encoder) {
             @Override
             public double calcWeight(EdgeIteratorState edgeState, boolean reverse, int prevOrNextEdgeId) {
                 return Integer.MAX_VALUE * 2L;
             }
-        }, TraversalMode.NODE_BASED).setMaximumWeight(LandmarkStorage.PRECISION).calcWeight(edge, false);
+        }, 8).setMaximumWeight(LandmarkStorage.PRECISION).calcWeight(edge, false);
         assertEquals(Integer.MAX_VALUE, res);
 
         dir = new RAMDirectory();
-        res = new LandmarkStorage(ghStorage, dir, 8, new FastestWeighting(encoder) {
+        res = new LandmarkStorage(ghStorage, dir, new FastestWeighting(encoder) {
             @Override
             public double calcWeight(EdgeIteratorState edgeState, boolean reverse, int prevOrNextEdgeId) {
                 return Double.POSITIVE_INFINITY;
             }
-        }, TraversalMode.NODE_BASED).setMaximumWeight(LandmarkStorage.PRECISION).calcWeight(edge, false);
+        }, 8).setMaximumWeight(LandmarkStorage.PRECISION).calcWeight(edge, false);
         assertEquals(Integer.MAX_VALUE, res);
     }
 
@@ -87,22 +93,31 @@ public class LandmarkStorageTest {
         DataAccess da = dir.find("landmarks_fastest_car");
         da.create(2000);
 
-        LandmarkStorage lms = new LandmarkStorage(ghStorage, dir, 4, new FastestWeighting(encoder), tm).setMaximumWeight(LandmarkStorage.PRECISION);
-        // 2^16=65536, use -1 for infinity and -2 for maximum
-        lms.setWeight(0, 65536);
-        // reached maximum value but do not reset to 0 instead use 2^16-2
-        assertEquals(65536 - 2, lms.getFromWeight(0, 0));
-        lms.setWeight(0, 65535);
-        assertEquals(65534, lms.getFromWeight(0, 0));
-        lms.setWeight(0, 79999);
-        assertEquals(65534, lms.getFromWeight(0, 0));
+        LandmarkStorage lms = new LandmarkStorage(ghStorage, dir, new FastestWeighting(encoder), 4).
+                setMaximumWeight(LandmarkStorage.PRECISION);
+        /* FROM_WEIGHT_BITS = 18
+        2^18 = 262144, use -1 for infinity and -2 for maximum
+        As the backward weight reaches a too high value it will use the maximum instead of 0 or infinity*/
+        lms.setWeight(0, 0, 16, Math.pow(2, 18), true);
+        assertEquals((int) Math.pow(2, 18) - 2, lms.getFromWeight(0, 0));
+        lms.setWeight(0, 0, 16, 999999, true);
+        assertEquals((int) Math.pow(2, 18) - 2, lms.getFromWeight(0, 0));
+
+        lms.setWeight(0, 0, 16, 999999, false);
+        // The important property is that the weight that is returned
+        // is _not bigger_ than the weight that was set.
+        assertTrue(lms.getToWeight(0, 0) * lms.getFactor() <= 999999);
+        lms.setWeight(0, 0, 16, 1, false);
+        // This is an underrun of the 'delta' field -- but still, the important property is that the weight that is returned
+        // is _not bigger_ than the weight that was set.
+        assertTrue(lms.getToWeight(0, 0) * lms.getFactor() <= 1);
 
         da.setInt(0, Integer.MAX_VALUE);
         assertTrue(lms.isInfinity(0));
         // for infinity return much bigger value
         // assertEquals(Integer.MAX_VALUE, lms.getFromWeight(0, 0));
 
-        lms.setWeight(0, 79999);
+        lms.setWeight(0, 0, 16, 999999, true);
         assertFalse(lms.isInfinity(0));
     }
 
@@ -111,11 +126,11 @@ public class LandmarkStorageTest {
         ghStorage.edge(0, 1, 10, true);
         ghStorage.edge(1, 2, 10, true);
 
-        ghStorage.edge(2, 4).setFlags(encoder.setAccess(0, false, false));
+        ghStorage.edge(2, 4).set(encoder.getAccessEnc(), false).setReverse(encoder.getAccessEnc(), false);
         ghStorage.edge(4, 5, 10, true);
         ghStorage.edge(5, 6, 10, false);
 
-        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), 2, new FastestWeighting(encoder), TraversalMode.NODE_BASED);
+        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), new FastestWeighting(encoder), 2);
         storage.setMinimumNodes(2);
         storage.createLandmarks();
         assertEquals(3, storage.getSubnetworksWithLandmarks());
@@ -133,7 +148,7 @@ public class LandmarkStorageTest {
         ghStorage.edge(3, 2, 10, false);
         ghStorage.edge(3, 4, 10, true);
 
-        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), 2, new FastestWeighting(encoder), TraversalMode.NODE_BASED);
+        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), new FastestWeighting(encoder), 2);
         storage.setMinimumNodes(3);
         storage.createLandmarks();
         assertEquals(2, storage.getSubnetworksWithLandmarks());
@@ -151,7 +166,7 @@ public class LandmarkStorageTest {
         ghStorage.edge(4, 5, 10, true);
         ghStorage.edge(5, 2, 10, false);
 
-        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), 2, new FastestWeighting(encoder), TraversalMode.NODE_BASED);
+        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), new FastestWeighting(encoder), 2);
         storage.setMinimumNodes(2);
         storage.createLandmarks();
 
@@ -163,10 +178,10 @@ public class LandmarkStorageTest {
     public void testWeightingConsistence() {
         // create an indifferent problem: shortest weighting can pass the speed==0 edge but fastest cannot (?)
         ghStorage.edge(0, 1, 10, true);
-        ghStorage.edge(1, 2).setDistance(10).setFlags(encoder.setProperties(0.9, true, true));
+        GHUtility.setProperties(ghStorage.edge(1, 2).setDistance(10), encoder, 0.9, true, true);
         ghStorage.edge(2, 3, 10, true);
 
-        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), 2, new FastestWeighting(encoder), TraversalMode.NODE_BASED);
+        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), new FastestWeighting(encoder), 2);
         storage.setMinimumNodes(2);
         storage.createLandmarks();
 
@@ -176,9 +191,9 @@ public class LandmarkStorageTest {
 
     @Test
     public void testWithBorderBlocking() {
-        AbstractRoutingAlgorithmTester.initBiGraph(ghStorage);
+        RoutingAlgorithmTest.initBiGraph(ghStorage);
 
-        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), 2, new FastestWeighting(encoder), TraversalMode.NODE_BASED);
+        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), new FastestWeighting(encoder), 2);
         final SpatialRule ruleRight = new DefaultSpatialRule() {
             @Override
             public String getId() {
@@ -212,13 +227,18 @@ public class LandmarkStorageTest {
             }
 
             @Override
+            public SpatialRule getSpatialRule(int spatialId) {
+                throw new IllegalStateException();
+            }
+
+            @Override
             public int size() {
                 return 2;
             }
 
             @Override
             public BBox getBounds() {
-                return new BBox(-180,180,-90,90);
+                return new BBox(-180, 180, -90, 90);
             }
         };
 
@@ -226,5 +246,75 @@ public class LandmarkStorageTest {
         storage.setMinimumNodes(2);
         storage.createLandmarks();
         assertEquals(3, storage.getSubnetworksWithLandmarks());
+    }
+
+    @Test
+    public void testDelta() {
+        int distance = 1000000;
+
+        ghStorage.edge(1, 2, distance, false);
+        ghStorage.edge(2, 3, distance, false);
+        ghStorage.edge(3, 1, distance, false);
+
+        ghStorage.edge(2, 4, distance, true);
+        ghStorage.edge(4, 5, distance, true);
+        ghStorage.edge(5, 6, distance, true);
+        ghStorage.edge(6, 7, distance, true);
+        ghStorage.edge(7, 8, distance, true);
+        ghStorage.edge(8, 9, distance, true);
+
+        ghStorage.edge(3, 10, distance, true);
+        ghStorage.edge(10, 11, distance, true);
+        ghStorage.edge(11, 12, distance, true);
+        ghStorage.edge(12, 13, distance, true);
+        ghStorage.edge(13, 14, distance, true);
+        ghStorage.edge(14, 15, distance, true);
+
+        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), new FastestWeighting(encoder), 2);
+        storage.createLandmarks();
+
+        assertEquals(15, storage.getLandmarks(1)[0]);
+        assertEquals(9, storage.getLandmarks(1)[1]);
+
+        assertEquals(35680, storage.getFromWeight(0, 1));
+        assertEquals(40777, storage.getToWeight(0, 1));
+        assertEquals(71361, storage.getFromWeight(0, 9));
+        assertEquals(66264, storage.getToWeight(0, 9));
+        assertEquals(15291, storage.getFromWeight(0, 12));
+        assertEquals(15291, storage.getToWeight(0, 12));
+        assertEquals(40777, storage.getFromWeight(1, 1));
+        assertEquals(35680, storage.getToWeight(1, 1));
+        assertEquals(50972, storage.getFromWeight(1, 12));
+        assertEquals(56069, storage.getToWeight(1, 12));
+        assertEquals(66264, storage.getFromWeight(1, 15));
+        assertEquals(71361, storage.getToWeight(1, 15));
+    }
+
+    @Test
+    public void testDeltaWarning() {
+        int distance = 1000000;
+
+        ghStorage.edge(1, 2, distance, false);
+        ghStorage.edge(2, 3, distance, false);
+        ghStorage.edge(3, 4, distance, false);
+        ghStorage.edge(4, 5, distance, false);
+        ghStorage.edge(5, 6, distance, false);
+        ghStorage.edge(6, 1, distance, false);
+
+        ghStorage.edge(1, 7, distance, true);
+        ghStorage.edge(7, 8, distance, true);
+        ghStorage.edge(8, 9, distance, true);
+
+        ghStorage.edge(6, 10, distance, true);
+        ghStorage.edge(10, 11, distance, true);
+        ghStorage.edge(11, 12, distance, true);
+
+        LandmarkStorage storage = new LandmarkStorage(ghStorage, new RAMDirectory(), new FastestWeighting(encoder), 2);
+        storage.createLandmarks();
+
+        assertEquals(12, storage.getLandmarks(1)[0]);
+        assertEquals(9, storage.getLandmarks(1)[1]);
+
+        assertEquals((int) Math.pow(2, 13) - 2, storage.getToWeight(0, 9) - storage.getFromWeight(0, 9));
     }
 }

@@ -17,23 +17,18 @@
  */
 package com.graphhopper.storage;
 
+import com.graphhopper.coll.GHBitSet;
 import com.graphhopper.coll.GHIntHashSet;
+import com.graphhopper.coll.GHTBitSet;
 import com.graphhopper.routing.util.EdgeFilter;
-import com.graphhopper.routing.util.HintsMap;
 import com.graphhopper.storage.index.LocationIndex;
 import com.graphhopper.storage.index.QueryResult;
 import com.graphhopper.util.BreadthFirstSearch;
-import com.graphhopper.util.ConfigMap;
 import com.graphhopper.util.EdgeIteratorState;
-
-import static com.graphhopper.util.Parameters.Routing.*;
-
 import com.graphhopper.util.PointList;
-import com.graphhopper.util.shapes.BBox;
-import com.graphhopper.util.shapes.Circle;
-import com.graphhopper.util.shapes.GHPoint;
-import com.graphhopper.util.shapes.Shape;
-import com.vividsolutions.jts.geom.*;
+import com.graphhopper.util.shapes.Polygon;
+import com.graphhopper.util.shapes.*;
+import org.locationtech.jts.geom.*;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -45,9 +40,6 @@ import java.util.List;
  */
 public class GraphEdgeIdFinder {
 
-    // internal properties
-    public static final String BLOCKED_EDGES = "graph_finder.blocked_edges";
-    public static final String BLOCKED_SHAPES = "graph_finder.blocked_shapes";
     private final Graph graph;
     private final LocationIndex locationIndex;
 
@@ -85,22 +77,40 @@ public class GraphEdgeIdFinder {
         if (shape.contains(qr.getSnappedPoint().lat, qr.getSnappedPoint().lon))
             edgeIds.add(qr.getClosestEdge().getEdge());
 
+        final boolean isPolygon = shape instanceof Polygon;
+
         BreadthFirstSearch bfs = new BreadthFirstSearch() {
             final NodeAccess na = graph.getNodeAccess();
             final Shape localShape = shape;
 
             @Override
+            protected GHBitSet createBitSet() {
+                return new GHTBitSet();
+            }
+
+            @Override
             protected boolean goFurther(int nodeId) {
+                if (isPolygon) return isInsideBBox(nodeId);
+
                 return localShape.contains(na.getLatitude(nodeId), na.getLongitude(nodeId));
             }
 
             @Override
             protected boolean checkAdjacent(EdgeIteratorState edge) {
-                if (localShape.contains(na.getLatitude(edge.getAdjNode()), na.getLongitude(edge.getAdjNode()))) {
+                int adjNodeId = edge.getAdjNode();
+
+                if (localShape.contains(na.getLatitude(adjNodeId), na.getLongitude(adjNodeId))) {
                     edgeIds.add(edge.getEdge());
                     return true;
                 }
-                return false;
+                return isPolygon && isInsideBBox(adjNodeId);
+            }
+
+            private boolean isInsideBBox(int nodeId) {
+                BBox bbox = localShape.getBounds();
+                double lat = na.getLatitude(nodeId);
+                double lon = na.getLongitude(nodeId);
+                return lat <= bbox.maxLat && lat >= bbox.minLat && lon <= bbox.maxLon && lon >= bbox.minLon;
             }
         };
         bfs.start(graph.createEdgeExplorer(filter), qr.getClosestNode());
@@ -111,10 +121,10 @@ public class GraphEdgeIdFinder {
      */
     public void fillEdgeIDs(GHIntHashSet edgeIds, Geometry geometry, EdgeFilter filter) {
         if (geometry instanceof Point) {
-            GHPoint point = GHPoint.from((Point) geometry);
+            GHPoint point = GHPoint.create((Point) geometry);
             findClosestEdgeToPoint(edgeIds, point, filter);
         } else if (geometry instanceof LineString) {
-            PointList pl = PointList.from((LineString) geometry);
+            PointList pl = PointList.fromLineString((LineString) geometry);
             // TODO do map matching or routing
             int lastIdx = pl.size() - 1;
             if (pl.size() >= 2) {
@@ -130,54 +140,88 @@ public class GraphEdgeIdFinder {
     }
 
     /**
-     * This method reads string values from the hints about blocked areas and fills the configMap with either the
-     * created shapes or the found edges if area is small enough.
+     * This method reads the blockAreaString and creates a Collection of Shapes or a set of found edges if area is small enough.
+     *
+     * @param useEdgeIdsUntilAreaSize until the specified area (specified in m²) use the findEdgesInShape method
      */
-    public ConfigMap parseStringHints(ConfigMap configMap, HintsMap hints, EdgeFilter filter) {
+    public BlockArea parseBlockArea(String blockAreaString, EdgeFilter filter, double useEdgeIdsUntilAreaSize) {
         final String objectSeparator = ";";
         final String innerObjSep = ",";
-        // use shapes if bigger than 1km^2
-        final double shapeArea = 1000 * 1000;
-
-        final GHIntHashSet blockedEdges = new GHIntHashSet();
-        final List<Shape> blockedShapes = new ArrayList<>();
+        BlockArea blockArea = new BlockArea(graph);
 
         // Add blocked circular areas or points
-        String blockedCircularAreasStr = hints.get(BLOCK_AREA, "");
-        if (!blockedCircularAreasStr.isEmpty()) {
-            String[] blockedCircularAreasArr = blockedCircularAreasStr.split(objectSeparator);
+        if (!blockAreaString.isEmpty()) {
+            String[] blockedCircularAreasArr = blockAreaString.split(objectSeparator);
             for (int i = 0; i < blockedCircularAreasArr.length; i++) {
                 String objectAsString = blockedCircularAreasArr[i];
                 String[] splittedObject = objectAsString.split(innerObjSep);
-                if (splittedObject.length == 4) {
+                if (splittedObject.length > 4) {
+                    final Polygon polygon = Polygon.parsePoints(objectAsString, 0.003);
+                    findEdgesInShape(blockArea.blockedEdges, polygon, filter);
+                } else if (splittedObject.length == 4) {
                     final BBox bbox = BBox.parseTwoPoints(objectAsString);
-                    if (bbox.calculateArea() > shapeArea)
-                        blockedShapes.add(bbox);
+                    if (bbox.calculateArea() > useEdgeIdsUntilAreaSize)
+                        blockArea.add(bbox);
                     else
-                        findEdgesInShape(blockedEdges, bbox, filter);
+                        findEdgesInShape(blockArea.blockedEdges, bbox, filter);
                 } else if (splittedObject.length == 3) {
                     double lat = Double.parseDouble(splittedObject[0]);
                     double lon = Double.parseDouble(splittedObject[1]);
                     int radius = Integer.parseInt(splittedObject[2]);
                     Circle circle = new Circle(lat, lon, radius);
-                    if (circle.calculateArea() > shapeArea) {
-                        blockedShapes.add(circle);
+                    if (circle.calculateArea() > useEdgeIdsUntilAreaSize) {
+                        blockArea.add(circle);
                     } else {
-                        findEdgesInShape(blockedEdges, circle, filter);
+                        findEdgesInShape(blockArea.blockedEdges, circle, filter);
                     }
                 } else if (splittedObject.length == 2) {
                     double lat = Double.parseDouble(splittedObject[0]);
                     double lon = Double.parseDouble(splittedObject[1]);
-                    findClosestEdge(blockedEdges, lat, lon, filter);
+                    findClosestEdge(blockArea.blockedEdges, lat, lon, filter);
                 } else {
                     throw new IllegalArgumentException(objectAsString + " at index " + i + " need to be defined as lat,lon "
                             + "or as a circle lat,lon,radius or rectangular lat1,lon1,lat2,lon2");
                 }
             }
         }
+        return blockArea;
+    }
 
-        configMap.put(BLOCKED_EDGES, blockedEdges);
-        configMap.put(BLOCKED_SHAPES, blockedShapes);
-        return configMap;
+    /**
+     * This class handles edges and areas where access should be blocked.
+     */
+    public static class BlockArea {
+        final GHIntHashSet blockedEdges = new GHIntHashSet();
+        final List<Shape> blockedShapes = new ArrayList<>();
+        private final NodeAccess na;
+
+        public BlockArea(Graph g) {
+            na = g.getNodeAccess();
+        }
+
+        public void add(int edgeId) {
+            blockedEdges.addAll(edgeId);
+        }
+
+        public void add(Shape shape) {
+            blockedShapes.add(shape);
+        }
+
+        /**
+         * @return true if the specified edgeState is part of this BlockArea
+         */
+        public final boolean contains(EdgeIteratorState edgeState) {
+            if (!blockedEdges.isEmpty() && blockedEdges.contains(edgeState.getEdge())) {
+                return true;
+            }
+
+            if (!blockedShapes.isEmpty() && na != null) {
+                for (Shape shape : blockedShapes) {
+                    if (shape.contains(na.getLatitude(edgeState.getAdjNode()), na.getLongitude(edgeState.getAdjNode())))
+                        return true;
+                }
+            }
+            return false;
+        }
     }
 }

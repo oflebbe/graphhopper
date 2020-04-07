@@ -1,14 +1,14 @@
 /*
  *  Licensed to GraphHopper GmbH under one or more contributor
- *  license agreements. See the NOTICE file distributed with this work for 
+ *  license agreements. See the NOTICE file distributed with this work for
  *  additional information regarding copyright ownership.
- * 
- *  GraphHopper GmbH licenses this file to you under the Apache License, 
- *  Version 2.0 (the "License"); you may not use this file except in 
+ *
+ *  GraphHopper GmbH licenses this file to you under the Apache License,
+ *  Version 2.0 (the "License"); you may not use this file except in
  *  compliance with the License. You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  *  Unless required by applicable law or agreed to in writing, software
  *  distributed under the License is distributed on an "AS IS" BASIS,
  *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -54,64 +54,55 @@ public class DouglasPeucker {
     }
 
     /**
-     * This method removes points which are close to the line (defined by maxDist).
+     * Simplifies the <code>points</code>, from index 0 to size-1.
      * <p>
+     * It is a wrapper method for {@link DouglasPeucker#simplify(PointList, int, int)}.
      *
-     * @return removed nodes
+     * @return The number removed points
      */
     public int simplify(PointList points) {
-        int removed = 0;
-        int size = points.getSize();
-        if (approx) {
-            int delta = 500;
-            int segments = size / delta + 1;
-            int start = 0;
-            for (int i = 0; i < segments; i++) {
-                // start of next is end of last segment, except for the last
-                removed += simplify(points, start, Math.min(size - 1, start + delta));
-                start += delta;
-            }
-        } else {
-            removed = simplify(points, 0, size - 1);
-        }
+        return simplify(points, 0, points.size() - 1);
+    }
 
-        compressNew(points, removed);
-        return removed;
+    public int simplify(PointList points, int fromIndex, int lastIndex) {
+        return simplify(points, fromIndex, lastIndex, true);
     }
 
     /**
-     * compress list: move points into EMPTY slots
+     * Simplifies a part of the <code>points</code>. The <code>fromIndex</code> and <code>lastIndex</code>
+     * are guaranteed to be kept.
+     *
+     * @param points    The PointList to simplify
+     * @param fromIndex Start index to simplify, should be <= <code>lastIndex</code>
+     * @param lastIndex Simplify up to this index
+     * @param compress  Whether or not the <code>points</code> shall be compressed or not, if set to false no points
+     *                  are actually removed, but instead their lat/lon/ele is only set to NaN
+     * @return The number of removed points
      */
-    void compressNew(PointList points, int removed) {
-        int freeIndex = -1;
-        for (int currentIndex = 0; currentIndex < points.getSize(); currentIndex++) {
-            if (Double.isNaN(points.getLatitude(currentIndex))) {
-                if (freeIndex < 0)
-                    freeIndex = currentIndex;
-
-                continue;
-            } else if (freeIndex < 0) {
-                continue;
+    public int simplify(PointList points, int fromIndex, int lastIndex, boolean compress) {
+        int removed = 0;
+        int size = lastIndex - fromIndex;
+        if (approx) {
+            int delta = 500;
+            int segments = size / delta + 1;
+            int start = fromIndex;
+            for (int i = 0; i < segments; i++) {
+                // start of next is end of last segment, except for the last
+                removed += subSimplify(points, start, Math.min(lastIndex, start + delta));
+                start += delta;
             }
-
-            points.set(freeIndex, points.getLatitude(currentIndex), points.getLongitude(currentIndex), points.getElevation(currentIndex));
-            points.set(currentIndex, Double.NaN, Double.NaN, Double.NaN);
-            // find next free index
-            int max = currentIndex;
-            int searchIndex = freeIndex + 1;
-            freeIndex = currentIndex;
-            for (; searchIndex < max; searchIndex++) {
-                if (Double.isNaN(points.getLatitude(searchIndex))) {
-                    freeIndex = searchIndex;
-                    break;
-                }
-            }
+        } else {
+            removed = subSimplify(points, fromIndex, lastIndex);
         }
-        points.trimToSize(points.getSize() - removed);
+
+        if (removed > 0 && compress)
+            removeNaN(points);
+
+        return removed;
     }
 
     // keep the points of fromIndex and lastIndex
-    int simplify(PointList points, int fromIndex, int lastIndex) {
+    int subSimplify(PointList points, int fromIndex, int lastIndex) {
         if (lastIndex - fromIndex < 2) {
             return 0;
         }
@@ -145,10 +136,24 @@ public class DouglasPeucker {
                 counter++;
             }
         } else {
-            counter = simplify(points, fromIndex, indexWithMaxDist);
-            counter += simplify(points, indexWithMaxDist, lastIndex);
+            counter = subSimplify(points, fromIndex, indexWithMaxDist);
+            counter += subSimplify(points, indexWithMaxDist, lastIndex);
         }
         return counter;
+    }
+
+    /**
+     * Fills all entries of the point list that are NaN with the subsequent values (and therefore shortens the list)
+     */
+    static void removeNaN(PointList pointList) {
+        int curr = 0;
+        for (int i = 0; i < pointList.size(); i++) {
+            if (!Double.isNaN(pointList.getLatitude(i))) {
+                pointList.set(curr, pointList.getLatitude(i), pointList.getLongitude(i), pointList.getElevation(i));
+                curr++;
+            }
+        }
+        pointList.trimToSize(curr);
     }
 
 }

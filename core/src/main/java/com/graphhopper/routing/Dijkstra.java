@@ -1,14 +1,14 @@
 /*
  *  Licensed to GraphHopper GmbH under one or more contributor
- *  license agreements. See the NOTICE file distributed with this work for 
+ *  license agreements. See the NOTICE file distributed with this work for
  *  additional information regarding copyright ownership.
- * 
- *  GraphHopper GmbH licenses this file to you under the Apache License, 
- *  Version 2.0 (the "License"); you may not use this file except in 
+ *
+ *  GraphHopper GmbH licenses this file to you under the Apache License,
+ *  Version 2.0 (the "License"); you may not use this file except in
  *  compliance with the License. You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  *  Unless required by applicable law or agreed to in writing, software
  *  distributed under the License is distributed on an "AS IS" BASIS,
  *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -25,6 +25,7 @@ import com.graphhopper.storage.Graph;
 import com.graphhopper.storage.SPTEntry;
 import com.graphhopper.util.EdgeExplorer;
 import com.graphhopper.util.EdgeIterator;
+import com.graphhopper.util.EdgeIteratorState;
 import com.graphhopper.util.Parameters;
 
 import java.util.PriorityQueue;
@@ -50,15 +51,15 @@ public class Dijkstra extends AbstractRoutingAlgorithm {
     }
 
     protected void initCollections(int size) {
-        fromHeap = new PriorityQueue<SPTEntry>(size);
-        fromMap = new GHIntObjectHashMap<SPTEntry>(size);
+        fromHeap = new PriorityQueue<>(size);
+        fromMap = new GHIntObjectHashMap<>(size);
     }
 
     @Override
     public Path calcPath(int from, int to) {
         checkAlreadyRun();
         this.to = to;
-        currEdge = createSPTEntry(from, 0);
+        currEdge = new SPTEntry(from, 0);
         if (!traversalMode.isEdgeBased()) {
             fromMap.put(from, currEdge);
         }
@@ -73,16 +74,17 @@ public class Dijkstra extends AbstractRoutingAlgorithm {
             if (isMaxVisitedNodesExceeded() || finished())
                 break;
 
-            int startNode = currEdge.adjNode;
-            EdgeIterator iter = explorer.setBaseNode(startNode);
+            int currNode = currEdge.adjNode;
+            EdgeIterator iter = explorer.setBaseNode(currNode);
             while (iter.next()) {
                 if (!accept(iter, currEdge.edge))
                     continue;
 
-                int traversalId = traversalMode.createTraversalId(iter, false);
                 double tmpWeight = weighting.calcWeight(iter, false, currEdge.edge) + currEdge.weight;
-                if (Double.isInfinite(tmpWeight))
+                if (Double.isInfinite(tmpWeight)) {
                     continue;
+                }
+                int traversalId = traversalMode.createTraversalId(iter, false);
 
                 SPTEntry nEdge = fromMap.get(traversalId);
                 if (nEdge == null) {
@@ -121,13 +123,15 @@ public class Dijkstra extends AbstractRoutingAlgorithm {
         if (currEdge == null || !finished())
             return createEmptyPath();
 
-        return new Path(graph, weighting).
-                setWeight(currEdge.weight).setSPTEntry(currEdge).extract();
+        return PathExtractor.extractPath(graph, weighting, currEdge);
     }
 
     @Override
     public int getVisitedNodes() {
         return visitedNodes;
+    }
+
+    protected void updateBestPath(EdgeIteratorState edgeState, SPTEntry bestSPTEntry, int traversalId) {
     }
 
     @Override

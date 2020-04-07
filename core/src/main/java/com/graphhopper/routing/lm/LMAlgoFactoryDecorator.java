@@ -1,14 +1,14 @@
 /*
  *  Licensed to GraphHopper GmbH under one or more contributor
- *  license agreements. See the NOTICE file distributed with this work for 
+ *  license agreements. See the NOTICE file distributed with this work for
  *  additional information regarding copyright ownership.
- * 
- *  GraphHopper GmbH licenses this file to you under the Apache License, 
- *  Version 2.0 (the "License"); you may not use this file except in 
+ *
+ *  GraphHopper GmbH licenses this file to you under the Apache License,
+ *  Version 2.0 (the "License"); you may not use this file except in
  *  compliance with the License. You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  *  Unless required by applicable law or agreed to in writing, software
  *  distributed under the License is distributed on an "AS IS" BASIS,
  *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -24,7 +24,6 @@ import com.graphhopper.routing.RoutingAlgorithm;
 import com.graphhopper.routing.RoutingAlgorithmFactory;
 import com.graphhopper.routing.RoutingAlgorithmFactoryDecorator;
 import com.graphhopper.routing.util.HintsMap;
-import com.graphhopper.routing.util.TraversalMode;
 import com.graphhopper.routing.weighting.AbstractWeighting;
 import com.graphhopper.routing.weighting.Weighting;
 import com.graphhopper.storage.Graph;
@@ -32,7 +31,6 @@ import com.graphhopper.storage.GraphHopperStorage;
 import com.graphhopper.storage.StorableProperties;
 import com.graphhopper.storage.index.LocationIndex;
 import com.graphhopper.util.CmdArgs;
-import com.graphhopper.util.Helper;
 import com.graphhopper.util.PMap;
 import com.graphhopper.util.Parameters;
 import com.graphhopper.util.Parameters.Landmark;
@@ -43,8 +41,9 @@ import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-import static com.graphhopper.util.Parameters.Landmark.DISABLE;
+import static com.graphhopper.util.Helper.*;
 
 /**
  * This class implements the A*, landmark and triangulation (ALT) decorator.
@@ -63,10 +62,12 @@ public class LMAlgoFactoryDecorator implements RoutingAlgorithmFactoryDecorator 
     private final List<Weighting> weightings = new ArrayList<>();
     private final Map<String, Double> maximumWeights = new HashMap<>();
     private boolean enabled = false;
+    private int minNodes = -1;
     private boolean disablingAllowed = false;
     private final List<String> lmSuggestionsLocations = new ArrayList<>(5);
     private int preparationThreads;
     private ExecutorService threadPool;
+    private boolean logDetails = false;
 
     public LMAlgoFactoryDecorator() {
         setPreparationThreads(1);
@@ -78,12 +79,15 @@ public class LMAlgoFactoryDecorator implements RoutingAlgorithmFactoryDecorator 
 
         landmarkCount = args.getInt(Parameters.Landmark.COUNT, landmarkCount);
         activeLandmarkCount = args.getInt(Landmark.ACTIVE_COUNT_DEFAULT, Math.min(8, landmarkCount));
-        for (String loc : args.get("prepare.lm.suggestions_location", "").split(",")) {
+        logDetails = args.getBool(Landmark.PREPARE + "log_details", false);
+        minNodes = args.getInt(Landmark.PREPARE + "min_network_size", -1);
+
+        for (String loc : args.get(Landmark.PREPARE + "suggestions_location", "").split(",")) {
             if (!loc.trim().isEmpty())
                 lmSuggestionsLocations.add(loc.trim());
         }
         String lmWeightingsStr = args.get(Landmark.PREPARE + "weightings", "");
-        if (!lmWeightingsStr.isEmpty()) {
+        if (!lmWeightingsStr.isEmpty() && !lmWeightingsStr.equalsIgnoreCase("no") && !lmWeightingsStr.equalsIgnoreCase("false")) {
             List<String> tmpLMWeightingList = Arrays.asList(lmWeightingsStr.split(","));
             setWeightingsAsStrings(tmpLMWeightingList);
         }
@@ -145,7 +149,7 @@ public class LMAlgoFactoryDecorator implements RoutingAlgorithmFactoryDecorator 
 
         weightingsAsStrings.clear();
         for (String strWeighting : weightingList) {
-            strWeighting = strWeighting.toLowerCase();
+            strWeighting = toLowerCase(strWeighting);
             strWeighting = strWeighting.trim();
             addWeighting(strWeighting);
         }
@@ -216,19 +220,26 @@ public class LMAlgoFactoryDecorator implements RoutingAlgorithmFactoryDecorator 
 
     @Override
     public RoutingAlgorithmFactory getDecoratedAlgorithmFactory(RoutingAlgorithmFactory defaultAlgoFactory, HintsMap map) {
-        boolean disableLM = map.getBool(DISABLE, false);
-        if (!isEnabled() || disablingAllowed && disableLM)
+        // for now do not allow mixing CH&LM #1082
+        boolean disableCH = map.getBool(Parameters.CH.DISABLE, false);
+        boolean disableLM = map.getBool(Parameters.Landmark.DISABLE, false);
+        if (!isEnabled() || disablingAllowed && disableLM || !disableCH)
             return defaultAlgoFactory;
 
         if (preparations.isEmpty())
             throw new IllegalStateException("No preparations added to this decorator");
+
+        // if no weighting or vehicle is specified for this request and there is only one preparation, use it
+        if ((map.getWeighting().isEmpty() || map.getVehicle().isEmpty()) && preparations.size() == 1) {
+            return new LMRAFactory(preparations.get(0), defaultAlgoFactory);
+        }
 
         for (final PrepareLandmarks p : preparations) {
             if (p.getWeighting().matches(map))
                 return new LMRAFactory(p, defaultAlgoFactory);
         }
 
-        // if the initial encoder&weighting has certain properies we could cross query it but for now avoid this
+        // if the initial encoder&weighting has certain properties we could cross query it but for now avoid this
         return defaultAlgoFactory;
     }
 
@@ -261,49 +272,51 @@ public class LMAlgoFactoryDecorator implements RoutingAlgorithmFactoryDecorator 
      * This method calculates the landmark data for all weightings (optionally in parallel) or if already existent loads it.
      *
      * @return true if the preparation data for at least one weighting was calculated.
-     * @see com.graphhopper.routing.ch.CHAlgoFactoryDecorator#prepare(StorableProperties) for a very similar method
+     * @see com.graphhopper.routing.ch.CHAlgoFactoryDecorator#prepare(StorableProperties, boolean) for a very similar method
      */
-    public boolean loadOrDoWork(final StorableProperties properties) {
-        ExecutorCompletionService completionService = new ExecutorCompletionService<>(threadPool);
+    public boolean loadOrDoWork(final StorableProperties properties, final boolean closeEarly) {
+        ExecutorCompletionService<String> completionService = new ExecutorCompletionService<>(threadPool);
         int counter = 0;
-        int submittedPreparations = 0;
-        boolean prepared = false;
+        final AtomicBoolean prepared = new AtomicBoolean(false);
         for (final PrepareLandmarks plm : preparations) {
             counter++;
-            if (plm.loadExisting())
-                continue;
-
-            prepared = true;
-            LOGGER.info(counter + "/" + getPreparations().size() + " calling LM prepare.doWork for " + plm.getWeighting() + " ... (" + Helper.getMemInfo() + ")");
+            final int tmpCounter = counter;
             final String name = AbstractWeighting.weightingToFileName(plm.getWeighting());
             completionService.submit(new Runnable() {
                 @Override
                 public void run() {
+                    if (plm.loadExisting())
+                        return;
+
+                    LOGGER.info(tmpCounter + "/" + getPreparations().size() + " calling LM prepare.doWork for " + plm.getWeighting() + " ... (" + getMemInfo() + ")");
+                    prepared.set(true);
                     Thread.currentThread().setName(name);
                     plm.doWork();
-                    properties.put(Landmark.PREPARE + "date." + name, Helper.createFormatter().format(new Date()));
+                    if (closeEarly) {
+                        plm.close();
+                    }
+                    properties.put(Landmark.PREPARE + "date." + name, createFormatter().format(new Date()));
                 }
             }, name);
-            submittedPreparations++;
         }
 
         threadPool.shutdown();
 
         try {
-            for (int i = 0; i < submittedPreparations; i++) {
+            for (int i = 0; i < preparations.size(); i++) {
                 completionService.take().get();
             }
         } catch (Exception e) {
             threadPool.shutdownNow();
             throw new RuntimeException(e);
         }
-        return prepared;
+        return prepared.get();
     }
 
     /**
      * This method creates the landmark storages ready for landmark creation.
      */
-    public void createPreparations(GraphHopperStorage ghStorage, TraversalMode traversalMode, LocationIndex locationIndex) {
+    public void createPreparations(GraphHopperStorage ghStorage, LocationIndex locationIndex) {
         if (!isEnabled() || !preparations.isEmpty())
             return;
         if (weightings.isEmpty())
@@ -327,10 +340,12 @@ public class LMAlgoFactoryDecorator implements RoutingAlgorithmFactoryDecorator 
                         "Couldn't find " + weighting.getName() + " in " + maximumWeights);
 
             PrepareLandmarks tmpPrepareLM = new PrepareLandmarks(ghStorage.getDirectory(), ghStorage,
-                    weighting, traversalMode, landmarkCount, activeLandmarkCount).
+                    weighting, landmarkCount, activeLandmarkCount).
                     setLandmarkSuggestions(lmSuggestions).
-                    setMaximumWeight(maximumWeight);
-
+                    setMaximumWeight(maximumWeight).
+                    setLogDetails(logDetails);
+            if (minNodes > 1)
+                tmpPrepareLM.setMinimumNodes(minNodes);
             addPreparation(tmpPrepareLM);
         }
     }

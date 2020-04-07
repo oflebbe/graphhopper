@@ -1,14 +1,14 @@
 /*
  *  Licensed to GraphHopper GmbH under one or more contributor
- *  license agreements. See the NOTICE file distributed with this work for 
+ *  license agreements. See the NOTICE file distributed with this work for
  *  additional information regarding copyright ownership.
- * 
- *  GraphHopper GmbH licenses this file to you under the Apache License, 
- *  Version 2.0 (the "License"); you may not use this file except in 
+ *
+ *  GraphHopper GmbH licenses this file to you under the Apache License,
+ *  Version 2.0 (the "License"); you may not use this file except in
  *  compliance with the License. You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  *  Unless required by applicable law or agreed to in writing, software
  *  distributed under the License is distributed on an "AS IS" BASIS,
  *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,8 +21,9 @@ import com.graphhopper.GraphHopper;
 
 import java.io.InputStreamReader;
 import java.util.List;
+import java.util.StringTokenizer;
 
-import static com.graphhopper.util.Helper.readFile;
+import static com.graphhopper.util.Helper.*;
 
 /**
  * Defining several important constants for GraphHopper. Partially taken from Lucene.
@@ -32,6 +33,7 @@ public class Constants {
      * The value of <tt>System.getProperty("java.version")</tt>. *
      */
     public static final String JAVA_VERSION = System.getProperty("java.version");
+
     /**
      * The value of <tt>System.getProperty("os.name")</tt>. *
      */
@@ -59,25 +61,43 @@ public class Constants {
     public static final String OS_ARCH = System.getProperty("os.arch");
     public static final String OS_VERSION = System.getProperty("os.version");
     public static final String JAVA_VENDOR = System.getProperty("java.vendor");
+    public static final String JVM_SPEC_VERSION = System.getProperty("java.specification.version");
+    public static final boolean JRE_IS_MINIMUM_JAVA9;
+    private static final int JVM_MAJOR_VERSION;
+    private static final int JVM_MINOR_VERSION;
+
     public static final int VERSION_NODE = 5;
-    public static final int VERSION_EDGE = 14;
-    public static final int VERSION_SHORTCUT = 2;
+    public static final int VERSION_EDGE = 15;
+    public static final int VERSION_SHORTCUT = 5;
     public static final int VERSION_GEOMETRY = 4;
     public static final int VERSION_LOCATION_IDX = 3;
-    public static final int VERSION_NAME_IDX = 3;
+    public static final int VERSION_STRING_IDX = 5;
     /**
      * The version without the snapshot string
      */
     public static final String VERSION;
     public static final String BUILD_DATE;
+    /**
+     * Details about the git commit this artifact was build for, can be null (if not build using maven)
+     */
+    public static final GitInfo GIT_INFO;
     public static final boolean SNAPSHOT;
 
     static {
+        final StringTokenizer st = new StringTokenizer(JVM_SPEC_VERSION, ".");
+        JVM_MAJOR_VERSION = Integer.parseInt(st.nextToken());
+        if (st.hasMoreTokens()) {
+            JVM_MINOR_VERSION = Integer.parseInt(st.nextToken());
+        } else {
+            JVM_MINOR_VERSION = 0;
+        }
+        JRE_IS_MINIMUM_JAVA9 = JVM_MAJOR_VERSION > 1 || (JVM_MAJOR_VERSION == 1 && JVM_MINOR_VERSION >= 9);
+
         String version = "0.0";
         try {
             // see com/graphhopper/version file in resources which is modified in the maven packaging process
             // to contain the current version
-            List<String> v = readFile(new InputStreamReader(GraphHopper.class.getResourceAsStream("version"), Helper.UTF_CS));
+            List<String> v = readFile(new InputStreamReader(GraphHopper.class.getResourceAsStream("version"), UTF_CS));
             version = v.get(0);
         } catch (Exception ex) {
             System.err.println("GraphHopper Initialization ERROR: cannot read version!? " + ex.getMessage());
@@ -97,21 +117,34 @@ public class Constants {
             if (indexM >= 0)
                 tmp = version.substring(0, indexM);
 
-            SNAPSHOT = version.toLowerCase().contains("-snapshot");
+            SNAPSHOT = toLowerCase(version).contains("-snapshot");
             VERSION = tmp;
         }
         String buildDate = "";
         try {
-            List<String> v = readFile(new InputStreamReader(GraphHopper.class.getResourceAsStream("builddate"), Helper.UTF_CS));
+            List<String> v = readFile(new InputStreamReader(GraphHopper.class.getResourceAsStream("builddate"), UTF_CS));
             buildDate = v.get(0);
         } catch (Exception ex) {
         }
         BUILD_DATE = buildDate;
+
+        List<String> gitInfos = null;
+        try {
+            gitInfos = readFile(new InputStreamReader(GraphHopper.class.getResourceAsStream("gitinfo"), UTF_CS));
+            if (gitInfos.size() != 6) {
+                System.err.println("GraphHopper Initialization WARNING: unexpected git info: " + gitInfos.toString());
+                gitInfos = null;
+            } else if (gitInfos.get(1).startsWith("$")) {
+                gitInfos = null;
+            }
+        } catch (Exception ex) {
+        }
+        GIT_INFO = gitInfos == null ? null : new GitInfo(gitInfos.get(1), gitInfos.get(2), gitInfos.get(3), gitInfos.get(4), Boolean.parseBoolean(gitInfos.get(5)));
     }
 
     public static String getVersions() {
         return VERSION_NODE + "," + VERSION_EDGE + "," + VERSION_GEOMETRY + "," + VERSION_LOCATION_IDX
-                + "," + VERSION_NAME_IDX + "," + VERSION_SHORTCUT;
+                + "," + VERSION_STRING_IDX + "," + VERSION_SHORTCUT;
     }
 
     public static String getMajorVersion() {
