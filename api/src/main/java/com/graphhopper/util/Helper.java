@@ -20,8 +20,8 @@ package com.graphhopper.util;
 import com.graphhopper.util.shapes.BBox;
 
 import java.io.*;
-import java.lang.management.GarbageCollectorMXBean;
-import java.lang.management.ManagementFactory;
+//import java.lang.management.GarbageCollectorMXBean;
+//import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
 // import java.nio.MappedByteBuffer;
 import java.nio.charset.Charset;
@@ -186,7 +186,7 @@ public class Helper {
     }
 
     public static int getUsedMBAfterGC() {
-        long before = getTotalGcCount();
+        /* long before = getTotalGcCount();
         // trigger gc
         System.gc();
         while (getTotalGcCount() == before) {
@@ -194,9 +194,11 @@ public class Helper {
         }
         long result = (ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed() +
                 ManagementFactory.getMemoryMXBean().getNonHeapMemoryUsage().getUsed()) / (1024 * 1024);
-        return (int) result;
+        return (int) result; */
+        return 0;
     }
 
+    /*
     private static long getTotalGcCount() {
         long sum = 0;
         for (GarbageCollectorMXBean b : ManagementFactory.getGarbageCollectorMXBeans()) {
@@ -206,7 +208,7 @@ public class Helper {
             }
         }
         return sum;
-    }
+    } */
 
     public static int getSizeOfObjectRef(int factor) {
         // pointer to class, flags, lock
@@ -351,78 +353,6 @@ public class Helper {
 
     public static void cleanMappedByteBuffer(final ByteBuffer buffer) {
         // TODO avoid reflection on every call
-        try {
-            AccessController.doPrivileged(new PrivilegedExceptionAction<Object>() {
-                @Override
-                public Object run() throws Exception {
-                    if (Constants.JAVA_VERSION.equals("9-ea")) {
-                        // >=JDK9 class sun.misc.Unsafe { void invokeCleaner(ByteBuffer buf) }
-                        final Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
-                        // we do not need to check for a specific class, we can call the Unsafe method with any buffer class
-                        MethodHandle unmapper = MethodHandles.lookup().findVirtual(unsafeClass, "invokeCleaner",
-                                MethodType.methodType(void.class, ByteBuffer.class));
-                        // fetch the unsafe instance and bind it to the virtual MethodHandle
-                        final Field f = unsafeClass.getDeclaredField("theUnsafe");
-                        f.setAccessible(true);
-                        final Object theUnsafe = f.get(null);
-                        try {
-                            unmapper.bindTo(theUnsafe).invokeExact(buffer);
-                            return null;
-                        } catch (Throwable t) {
-                            throw new RuntimeException(t);
-                        }
-                    }
-
-                    if (buffer.getClass().getSimpleName().equals("MappedByteBufferAdapter")) {
-                        if (!Constants.ANDROID)
-                            throw new RuntimeException("MappedByteBufferAdapter only supported for Android at the moment");
-
-                        // For Android 4.1 call ((MappedByteBufferAdapter)buffer).free() see #914
-                        Class<?> directByteBufferClass = Class.forName("java.nio.MappedByteBufferAdapter");
-                        callBufferFree(buffer, directByteBufferClass);
-                    } else {
-                        // <=JDK8 class DirectByteBuffer { sun.misc.Cleaner cleaner(Buffer buf) }
-                        //        then call sun.misc.Cleaner.clean
-                        final Class<?> directByteBufferClass = Class.forName("java.nio.DirectByteBuffer");
-                        try {
-                            final Method dbbCleanerMethod = directByteBufferClass.getMethod("cleaner");
-                            dbbCleanerMethod.setAccessible(true);
-                            // call: cleaner = ((DirectByteBuffer)buffer).cleaner()
-                            final Object cleaner = dbbCleanerMethod.invoke(buffer);
-                            if (cleaner != null) {
-                                final Class<?> cleanerMethodReturnType = dbbCleanerMethod.getReturnType();
-                                final Method cleanMethod = cleanerMethodReturnType.getDeclaredMethod("clean");
-                                cleanMethod.setAccessible(true);
-                                // call: ((sun.misc.Cleaner)cleaner).clean()
-                                cleanMethod.invoke(cleaner);
-                            }
-                        } catch (NoSuchMethodException ex2) {
-                            if (Constants.ANDROID)
-                                // For Android 5.1.1 call ((DirectByteBuffer)buffer).free() see #933
-                                callBufferFree(buffer, directByteBufferClass);
-                            else
-                                // ignore if method cleaner or clean is not available
-                                LOGGER.warn("NoSuchMethodException | " + Constants.JAVA_VERSION, ex2);
-                        }
-                    }
-
-                    return null;
-                }
-            });
-        } catch (PrivilegedActionException e) {
-            throw new RuntimeException("Unable to unmap the mapped buffer", e);
-        }
-    }
-
-    private static void callBufferFree(ByteBuffer buffer, Class<?> directByteBufferClass)
-            throws InvocationTargetException, IllegalAccessException {
-        try {
-            final Method dbbFreeMethod = directByteBufferClass.getMethod("free");
-            dbbFreeMethod.setAccessible(true);
-            dbbFreeMethod.invoke(buffer);
-        } catch (NoSuchMethodException ex2) {
-            LOGGER.warn("NoSuchMethodException | " + Constants.JAVA_VERSION, ex2);
-        }
     }
 
     /**
